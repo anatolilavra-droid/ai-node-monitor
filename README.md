@@ -1,6 +1,7 @@
 # POWER-NODE-01
 
 [![CI](https://github.com/anatolilavra-droid/ai-node-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/anatolilavra-droid/ai-node-monitor/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A local-first inference appliance: a Fastify API in front of a local LLM
 engine process, an SSE-streamed vanilla-JS monitoring console, and durable
@@ -211,3 +212,7 @@ tests/integration/   real SQLite + real engine process
 
 - Idea & project owner: [@anatolilavra-droid](https://github.com/anatolilavra-droid)
 - Implementation: [Claude Code](https://claude.ai/code)
+
+## License
+
+[MIT](LICENSE)

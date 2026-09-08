@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "POWER-NODE-01 - local-first inference appliance (Fastify API, SSE monitoring console, SQLite history)",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "main": "dist/server.js",
   "engines": {
