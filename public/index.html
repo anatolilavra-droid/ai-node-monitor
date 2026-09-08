@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>POWER-NODE-01 Monitor</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header>
+    <h1>POWER-NODE-01</h1>
+    <div id="ready-badge" class="badge badge-unknown">checking readiness&hellip;</div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>New generation</h2>
+      <form id="generate-form">
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" name="prompt" rows="4" required maxlength="8000"></textarea>
+
+        <div class="row">
+          <div>
+            <label for="model">Model</label>
+            <input id="model" name="model" type="text" value="mock-engine-v1" maxlength="200" />
+          </div>
+          <div>
+            <label for="maxTokens">Max tokens</label>
+            <input id="maxTokens" name="maxTokens" type="number" min="1" max="2048" value="64" />
+          </div>
+        </div>
+
+        <div class="row actions">
+          <button id="generate-btn" type="submit">Generate</button>
+          <button id="cancel-btn" type="button" disabled>Cancel</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>Run status</h2>
+      <div id="run-status" class="status status-idle">idle</div>
+      <dl class="meta">
+        <dt>Run ID</dt><dd id="meta-run-id">&mdash;</dd>
+        <dt>Tokens</dt><dd id="meta-tokens">0</dd>
+        <dt>Duration</dt><dd id="meta-duration">&mdash;</dd>
+      </dl>
+      <pre id="output" aria-live="polite"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>Recent runs</h2>
+      <button id="refresh-runs-btn" type="button">Refresh</button>
+      <table id="runs-table">
+        <thead>
+          <tr><th>ID</th><th>Status</th><th>Model</th><th>Tokens</th><th>Created</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
