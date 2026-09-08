@@ -191,21 +191,27 @@ behind a process supervisor (systemd, pm2, etc.).
 
 ## Project structure
 
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how these layers
+depend on each other and why, and [`docs/TESTING.md`](docs/TESTING.md)
+for how the two test suites differ.
+
 ```
-.github/workflows/  CI pipeline (typecheck, lint, test, build)
+.github/workflows/   CI pipeline (typecheck, lint, test, build)
 db/migrations/       immutable SQL schema migrations
-docs/                API/SSE contract, screenshots
+docs/                API/SSE contract, architecture, testing guide, screenshots
 src/config/          env loading and validation (Zod)
-src/db/              SQLite connection + migration runner
-src/domain/          shared types
+src/domain/          business logic: GenerationService, run state machine
+                     (status.ts), structured errors, port interfaces
+src/db/              SQLite: RunsRepository (implements RunsRepositoryPort),
+                     connection + migration runner
+src/engine/          engine process manager, resilient client
+                     (circuit breaker + retry, implements EnginePort)
+src/telemetry/       event bus + metrics collector
 src/schemas/         Zod request schemas
-src/repositories/    prepared-statement SQL access
-src/engine/          engine process manager, HTTP client, mock engine
-src/services/        generation lifecycle, serializers
-src/routes/          Fastify route handlers
+src/api/             Fastify route handlers (HTTP/SSE only, no business logic)
 public/              vanilla-JS monitoring console (no bundler)
-tests/unit/          fast, no I/O
-tests/integration/   real SQLite + real engine process
+tests/unit/          fast (<100ms), in-memory SQLite + port fakes, no I/O
+tests/integration/   real SQLite file + real engine process
 ```
 
 ## Contributors

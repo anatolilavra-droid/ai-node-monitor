@@ -1,4 +1,4 @@
-import type { Run } from '../domain/types.js';
+import type { Run } from './types.js';
 
 export interface RunView {
   id: string;

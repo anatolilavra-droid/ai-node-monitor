@@ -25,6 +25,8 @@ The runtime must work without cloud inference, Docker, Kubernetes, Redis, or Pos
 10. A schema change requires an immutable SQL migration and migration test.
 11. Public API and SSE event changes require a contract update and compatibility decision.
 12. The system must fail closed on invalid configuration, malformed input, authentication failure, and unsafe model manifests.
+13. The domain layer (`src/domain/`) depends only on the port interfaces it declares (`RunsRepositoryPort`, `EnginePort`); it must never import Fastify, better-sqlite3, or any other transport/storage-specific type. See `docs/ARCHITECTURE.md`.
+14. A cancellation (`AbortError`) is never recorded as an engine failure; only a genuine engine error may trip the circuit breaker or count toward a retry budget.
 
 ## Language & Style
 
@@ -46,6 +48,7 @@ The runtime must work without cloud inference, Docker, Kubernetes, Redis, or Pos
 - Frontend uses browser-native ES modules; no bundler unless an ADR explicitly requires one.
 - Streaming uses Server-Sent Events; WebSocket is not used unless an ADR explicitly changes this.
 - Deployment is a native OS service first; containers are optional packaging only.
+- The internal layering (api/domain/db/engine/telemetry), the run state machine, and the engine's circuit-breaker/retry design are documented in `docs/ARCHITECTURE.md` - read it before restructuring any of those directories.
 
 ## Communication
 
@@ -71,6 +74,7 @@ The runtime must work without cloud inference, Docker, Kubernetes, Redis, or Pos
 - `npm run test` must pass.
 - `npm run test:integration` must pass.
 - `npm run build` must pass.
+- See `docs/TESTING.md` for unit vs. integration test conventions (in-memory SQLite and port fakes for unit tests; real SQLite file and real engine process for integration tests) before adding a new test file.
 
 For streaming changes:
 - run the SSE integration suite;

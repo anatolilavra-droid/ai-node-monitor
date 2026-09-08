@@ -1,9 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import type { AppConfig } from '../config/env.js';
 import { buildGenerateBodySchema, idempotencyKeyHeaderSchema } from '../schemas/generate.js';
-import type { RunsRepository } from '../repositories/runsRepository.js';
-import type { GenerationService, GenerationEvent } from '../services/generationService.js';
-import { serializeRun } from '../services/serializers.js';
+import type { RunsRepositoryPort } from '../domain/ports.js';
+import type { GenerationService, GenerationEvent } from '../domain/generationService.js';
+import { serializeRun } from '../domain/serializers.js';
 
 const ROUTE = 'POST /generate';
 
@@ -14,7 +14,7 @@ function sseEventNameFor(type: GenerationEvent['type']): string {
 export function registerGenerateRoute(
   app: FastifyInstance,
   config: AppConfig,
-  runsRepository: RunsRepository,
+  runsRepository: RunsRepositoryPort,
   generationService: GenerationService
 ): void {
   const generateBodySchema = buildGenerateBodySchema(config);

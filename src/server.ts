@@ -3,7 +3,7 @@ import { loadConfig } from './config/env.js';
 import { openDatabase } from './db/connection.js';
 import { runMigrations } from './db/migrate.js';
 import { EngineManager } from './engine/engineManager.js';
-import { buildApp } from './app.js';
+import { AppState } from './app.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -12,21 +12,17 @@ async function main(): Promise<void> {
 
   const engineLogger = pino({ level: config.LOG_LEVEL });
   const engine = new EngineManager(config, engineLogger);
-  const app = buildApp({ config, db, engine });
+  const appState = new AppState({ config, db, engine });
 
-  await engine.start();
-
-  const address = await app.listen({ host: config.HOST, port: config.PORT });
-  app.log.info(`POWER-NODE-01 listening on ${address}`);
+  await appState.start();
+  appState.log.info(`POWER-NODE-01 listening on http://${config.HOST}:${config.PORT}`);
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    app.log.info({ signal }, 'shutting down');
-    await app.close();
-    await engine.stop();
-    db.close();
+    appState.log.info({ signal }, 'shutting down');
+    await appState.stop();
     process.exit(0);
   };
 

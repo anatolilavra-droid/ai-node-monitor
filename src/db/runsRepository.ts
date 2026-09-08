@@ -1,18 +1,16 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
-import { runFromRow, type Run, type RunRow, type RunStatus } from '../domain/types.js';
+import type { Run, RunStatus } from '../domain/types.js';
+import type { CreateRunInput, RunsRepositoryPort, StatusPatch } from '../domain/ports.js';
+import { runFromRow, type RunRow } from './runRow.js';
 
-export interface CreateRunInput {
-  model: string;
-  prompt: string;
-  maxTokens: number;
-}
-
-export interface AppendTokenResult {
-  updated: boolean;
-}
-
-export class RunsRepository {
+/**
+ * All SQL for the `runs` and `idempotency_keys` tables lives here -
+ * nothing above this layer (GenerationService, routes) writes a query
+ * directly. Implements RunsRepositoryPort so the domain layer can depend
+ * on the interface instead of this concrete class.
+ */
+export class RunsRepository implements RunsRepositoryPort {
   constructor(private readonly db: Database.Database) {}
 
   createQueued(input: CreateRunInput): Run {
@@ -43,14 +41,11 @@ export class RunsRepository {
    * Optimistic-concurrency transition: only applies when the row is still
    * at `expectedVersion`. Returns false (no-op) if another writer already
    * moved the run past that version, e.g. a concurrent cancel racing the
-   * generation loop's own completion update.
+   * generation loop's own completion update. This method trusts `status`
+   * is a legal transition - callers compute it via domain/status.ts's
+   * `nextStatus` first.
    */
-  transitionStatus(
-    id: string,
-    expectedVersion: number,
-    status: RunStatus,
-    patch: Partial<Pick<Run, 'output' | 'tokenCount' | 'errorMessage' | 'startedAt' | 'finishedAt' | 'durationMs'>> = {}
-  ): boolean {
+  transitionStatus(id: string, expectedVersion: number, status: RunStatus, patch: StatusPatch = {}): boolean {
     const now = new Date().toISOString();
     const result = this.db
       .prepare(

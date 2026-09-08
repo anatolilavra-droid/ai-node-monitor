@@ -1,19 +1,19 @@
-export interface EngineToken {
-  token: string;
-  index: number;
-}
+import type { EngineToken } from '../domain/ports.js';
+
+export type { EngineToken };
 
 /**
- * Streams tokens from the local engine's NDJSON completion endpoint.
- * The AbortSignal is the single cancellation path: aborting it tears down
- * the underlying HTTP request to the engine, which the engine observes as
- * a client disconnect and stops generating (see mockEngineServer.ts).
+ * Opens the completion request and returns a reader positioned at the
+ * start of the NDJSON body. Split out from token consumption so
+ * ResilientEngineClient can retry only this half on failure - retrying
+ * after tokens have already been yielded to a caller would duplicate
+ * output, so that half is never retried.
  */
-export async function* streamCompletion(
+export async function connectCompletion(
   baseUrl: string,
   input: { prompt: string; maxTokens: number },
   signal: AbortSignal
-): AsyncGenerator<EngineToken, void, void> {
+): Promise<ReadableStreamDefaultReader<Uint8Array>> {
   const res = await fetch(`${baseUrl}/completion`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -25,7 +25,20 @@ export async function* streamCompletion(
     throw new Error(`engine completion request failed with status ${res.status}`);
   }
 
-  const reader = res.body.getReader();
+  return res.body.getReader();
+}
+
+/**
+ * Consumes newline-delimited JSON tokens from an already-connected
+ * completion stream. The AbortSignal that was passed to connectCompletion
+ * remains the single cancellation path: aborting it tears down the
+ * underlying HTTP request, which the engine observes as a client
+ * disconnect and stops generating (see mockEngineServer.ts) - this
+ * generator simply sees `reader.read()` reject.
+ */
+export async function* consumeCompletion(
+  reader: ReadableStreamDefaultReader<Uint8Array>
+): AsyncGenerator<EngineToken, void, void> {
   const decoder = new TextDecoder();
   let buffer = '';
 
@@ -52,4 +65,14 @@ export async function* streamCompletion(
   } finally {
     reader.releaseLock();
   }
+}
+
+/** Connects and consumes in one call - the plain, non-resilient path. */
+export async function* streamCompletion(
+  baseUrl: string,
+  input: { prompt: string; maxTokens: number },
+  signal: AbortSignal
+): AsyncGenerator<EngineToken, void, void> {
+  const reader = await connectCompletion(baseUrl, input, signal);
+  yield* consumeCompletion(reader);
 }
