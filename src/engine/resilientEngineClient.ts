@@ -2,9 +2,9 @@ import type { EnginePort, EngineToken } from '../domain/ports.js';
 import type { AppLogger } from '../logging/appLogger.js';
 import type { EventBus } from '../telemetry/eventBus.js';
 import type { AppEventMap } from '../telemetry/events.js';
-import { CircuitBreaker } from './circuitBreaker.js';
-import { connectCompletion, consumeCompletion } from './engineClient.js';
+import { CircuitBreaker, type CircuitState } from './circuitBreaker.js';
 import type { EngineManager } from './engineManager.js';
+import type { RawEngineClient } from './rawEngineClient.js';
 import { RetryPolicy } from './retryPolicy.js';
 
 export interface ResilientEngineClientOptions {
@@ -28,7 +28,9 @@ const DEFAULTS: Required<ResilientEngineClientOptions> = {
  * production: process-level readiness from EngineManager, gated by a
  * circuit breaker that trips after repeated connection failures, with the
  * initial connection attempt (only - never the token stream itself)
- * retried with exponential backoff.
+ * retried with exponential backoff. The engine-protocol specifics (mock
+ * NDJSON vs. llama.cpp's OpenAI-compatible SSE) live behind the injected
+ * RawEngineClient - this class's resilience logic is identical either way.
  *
  * Cancellation is never treated as a failure: an AbortError means the
  * caller (or a client disconnect) asked to stop, not that the engine is
@@ -40,6 +42,7 @@ export class ResilientEngineClient implements EnginePort {
 
   constructor(
     private readonly engineManager: EngineManager,
+    private readonly rawClient: RawEngineClient,
     private readonly eventBus: EventBus<AppEventMap>,
     private readonly logger: AppLogger,
     options: ResilientEngineClientOptions = {}
@@ -61,13 +64,17 @@ export class ResilientEngineClient implements EnginePort {
     return this.engineManager.isReady() && this.circuitBreaker.canProceed();
   }
 
+  getCircuitState(): CircuitState {
+    return this.circuitBreaker.getState();
+  }
+
   async *streamCompletion(
     input: { prompt: string; maxTokens: number },
     signal: AbortSignal
   ): AsyncGenerator<EngineToken, void, void> {
     let reader: ReadableStreamDefaultReader<Uint8Array>;
     try {
-      reader = await this.retryPolicy.execute(() => connectCompletion(this.engineManager.getBaseUrl(), input, signal));
+      reader = await this.retryPolicy.execute(() => this.rawClient.connect(input, signal));
     } catch (err) {
       this.recordOutcome(false, err);
       throw err;
@@ -75,7 +82,7 @@ export class ResilientEngineClient implements EnginePort {
     this.recordOutcome(true);
 
     try {
-      yield* consumeCompletion(reader);
+      yield* this.rawClient.consume(reader);
     } catch (err) {
       this.recordOutcome(false, err);
       throw err;

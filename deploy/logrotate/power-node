@@ -1,0 +1,24 @@
+# Rotates the log file the power-node.service systemd unit appends to
+# (StandardOutput=append:/opt/power-node-01/logs/app.log - see
+# deploy/systemd/power-node.service). Install with:
+#
+#   sudo cp deploy/logrotate/power-node /etc/logrotate.d/power-node
+#   sudo logrotate -d /etc/logrotate.d/power-node   # dry run
+#
+# copytruncate is required, not a postrotate+SIGHUP reopen: systemd owns
+# the file descriptor it appended to directly (this is a plain
+# `StandardOutput=append:`, not a log library with its own reopen
+# signal), so renaming the file out from under it would leave systemd
+# writing to a now-unlinked inode forever. copytruncate copies the
+# current contents aside and truncates the original file in place, which
+# systemd's existing fd handles correctly.
+/opt/power-node-01/logs/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 power-node power-node
+}

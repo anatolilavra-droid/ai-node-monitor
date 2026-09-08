@@ -30,6 +30,27 @@ jobs:
 
       - run: npm run build
 
+      - name: Verify .env.example parses into a valid production config
+        run: npm run check:env-example
+
+      - name: Verify systemd unit files
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y systemd
+          systemd-analyze verify --recursive-errors=no deploy/systemd/power-node.service
+
+      - name: Shellcheck the backup script
+        run: |
+          sudo apt-get install -y shellcheck sqlite3
+          shellcheck deploy/scripts/backup.sh
+
+      - name: Exercise backup.sh against a real dev database
+        run: |
+          DB_PATH=/tmp/ci-backup-test/dev.sqlite
+          DB_PATH="$DB_PATH" node dist/db/migrate.js
+          ./deploy/scripts/backup.sh "$DB_PATH" /tmp/ci-backup-test/backups 2
+          ls /tmp/ci-backup-test/backups/*.bak.gz
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:

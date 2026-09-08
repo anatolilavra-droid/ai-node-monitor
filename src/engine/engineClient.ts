@@ -1,8 +1,16 @@
 import type { EngineToken } from '../domain/ports.js';
+import type { EngineManager } from './engineManager.js';
+import type { RawEngineClient } from './rawEngineClient.js';
 
 export type { EngineToken };
 
 /**
+ * @deprecated dev/test only. This talks to mockEngineServer.ts's
+ * proprietary NDJSON protocol, not a real model. Production deployments
+ * must set ENGINE_MODE=llama-cpp (see llamaCppEngineClient.ts and
+ * docs/DEPLOYMENT.md). Kept - deliberately not deleted - because CI and
+ * local development depend on it having zero external requirements.
+ *
  * Opens the completion request and returns a reader positioned at the
  * start of the NDJSON body. Split out from token consumption so
  * ResilientEngineClient can retry only this half on failure - retrying
@@ -75,4 +83,12 @@ export async function* streamCompletion(
 ): AsyncGenerator<EngineToken, void, void> {
   const reader = await connectCompletion(baseUrl, input, signal);
   yield* consumeCompletion(reader);
+}
+
+/** @deprecated dev/test only - see the module-level note above. */
+export function createMockRawEngineClient(engineManager: EngineManager): RawEngineClient {
+  return {
+    connect: (input, signal) => connectCompletion(engineManager.getBaseUrl(), input, signal),
+    consume: consumeCompletion
+  };
 }

@@ -1,0 +1,47 @@
+# Example systemd unit for a real llama.cpp server, run as its own
+# independently-supervised process (ENGINE_MODE=llama-cpp in power-node's
+# .env talks to it - power-node never spawns or kills it). This file is a
+# template: adjust ExecStart, the model path, and thread count for your
+# build and hardware, rename it to llama-cpp.service, then:
+#
+#   sudo cp deploy/systemd/llama-cpp.service.example /etc/systemd/system/llama-cpp.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now llama-cpp.service
+#   systemd-analyze verify /etc/systemd/system/llama-cpp.service
+#
+# Non-negotiable #1 (CLAUDE.md): this must bind 127.0.0.1 only. The
+# --host flag below is not optional.
+
+[Unit]
+Description=llama.cpp inference server (used by POWER-NODE-01)
+After=network.target
+
+[Service]
+Type=simple
+User=llama-cpp
+Group=llama-cpp
+WorkingDirectory=/opt/llama-cpp
+
+# --host 127.0.0.1 is load-bearing - see the note above.
+# --port must match ENGINE_START_PORT in power-node's .env.
+# -m points at the GGUF model file - see docs/RUNBOOKS/model-update.md
+# for how to change it safely (checksum, validate, symlink swap, rollback).
+ExecStart=/opt/llama-cpp/server \
+  --host 127.0.0.1 \
+  --port 8090 \
+  -m /opt/llama-cpp/models/current.gguf \
+  -c 4096 \
+  -t 8
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/llama-cpp/models
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -17,7 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run tests/unit",
-    "test:integration": "vitest run tests/integration"
+    "test:integration": "vitest run tests/integration",
+    "check:env-example": "node scripts/checkEnvExample.mjs"
   },
   "dependencies": {
     "@fastify/static": "^7.0.4",

@@ -49,6 +49,8 @@ The runtime must work without cloud inference, Docker, Kubernetes, Redis, or Pos
 - Streaming uses Server-Sent Events; WebSocket is not used unless an ADR explicitly changes this.
 - Deployment is a native OS service first; containers are optional packaging only.
 - The internal layering (api/domain/db/engine/telemetry), the run state machine, and the engine's circuit-breaker/retry design are documented in `docs/ARCHITECTURE.md` - read it before restructuring any of those directories.
+- `ENGINE_MODE` selects the engine: `mock` (default, dev/test - spawns a child process) or `llama-cpp` (production - connects to an already-running, independently-supervised llama.cpp server; this process never spawns or kills it). See `docs/DEPLOYMENT.md`.
+- Production deployment, security checklist/threat model, and operational runbooks live in `docs/DEPLOYMENT.md`, `docs/SECURITY.md`, `docs/MONITORING.md`, and `docs/RUNBOOKS/` - read the relevant one before touching `deploy/`, engine-mode switching, or the optional API auth gate.
 
 ## Communication
 
@@ -101,6 +103,15 @@ For engine changes:
 - verify cancellation;
 - verify metrics collection;
 - record model and engine version in the benchmark artifact.
+
+For deployment/ops changes (`deploy/`, `docs/DEPLOYMENT.md`,
+`docs/RUNBOOKS/`):
+- `systemd-analyze verify` any changed `.service` file;
+- run `deploy/scripts/backup.sh` against a real (dev) SQLite database and
+  confirm the integrity check and retention pruning both actually run;
+- keep `docs/DEPLOYMENT.md` a complete, step-by-step path from clone to
+  running service - a step that only works "if you already know X" is a
+  bug in the doc.
 
 ## Definition of Done
 

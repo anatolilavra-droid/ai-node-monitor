@@ -1,0 +1,78 @@
+# POWER-NODE-01 systemd unit. See docs/DEPLOYMENT.md for the full
+# install procedure (user creation, paths, .env, first start).
+#
+# Install:
+#   sudo cp deploy/systemd/power-node.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now power-node.service
+#
+# Verify the unit file itself before installing it:
+#   systemd-analyze verify deploy/systemd/power-node.service
+
+[Unit]
+Description=POWER-NODE-01 inference appliance (Fastify API)
+Documentation=https://github.com/anatolilavra-droid/ai-node-monitor
+After=network-online.target
+Wants=network-online.target
+# If the engine is a real llama.cpp server running as its own unit
+# (ENGINE_MODE=llama-cpp - see deploy/systemd/llama-cpp.service.example),
+# order this unit after it so a fresh boot doesn't race the two.
+# Uncomment once that unit exists on this host:
+# Wants=llama-cpp.service
+# After=llama-cpp.service
+
+[Service]
+Type=simple
+User=power-node
+Group=power-node
+WorkingDirectory=/opt/power-node-01
+EnvironmentFile=/opt/power-node-01/.env
+# Systemd services run with a minimal PATH, not your login shell's - if
+# Node was installed via nvm rather than a system package, replace this
+# with the absolute path from `command -v node` as the power-node user,
+# e.g. /home/power-node/.nvm/versions/node/v20.x.x/bin/node.
+ExecStart=/usr/bin/env node /opt/power-node-01/dist/server.js
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+# Structured JSON logs (pino) to a file so deploy/logrotate/power-node
+# has something to rotate. Create the directory and chown it to the
+# service user before first start:
+#   sudo mkdir -p /opt/power-node-01/logs
+#   sudo chown power-node:power-node /opt/power-node-01/logs
+StandardOutput=append:/opt/power-node-01/logs/app.log
+StandardError=append:/opt/power-node-01/logs/app.log
+
+# --- Hardening -----------------------------------------------------
+# This process only needs to: read its own code/config, read+write its
+# SQLite file and logs, and make outbound loopback HTTP calls to the
+# engine. Everything else is denied.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/power-node-01/data /opt/power-node-01/logs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

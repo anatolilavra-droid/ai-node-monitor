@@ -7,6 +7,9 @@ import { ZodError } from 'zod';
 import type { AppConfig } from './config/env.js';
 import type { EngineManager } from './engine/engineManager.js';
 import { ResilientEngineClient } from './engine/resilientEngineClient.js';
+import { createMockRawEngineClient } from './engine/engineClient.js';
+import { createLlamaCppRawClient } from './engine/llamaCppEngineClient.js';
+import type { RawEngineClient } from './engine/rawEngineClient.js';
 import { RunsRepository } from './db/runsRepository.js';
 import { GenerationService } from './domain/generationService.js';
 import { isAppError } from './domain/errors.js';
@@ -14,15 +17,31 @@ import { EventBus } from './telemetry/eventBus.js';
 import type { AppEventMap } from './telemetry/events.js';
 import { MetricsCollector, type MetricsSnapshot } from './telemetry/metricsCollector.js';
 import { registerHealthRoutes } from './api/health.js';
+import { registerInternalHealthRoute } from './api/internalHealth.js';
 import { registerGenerateRoute } from './api/generate.js';
 import { registerRunsRoutes } from './api/runs.js';
+import { registerAuthMiddleware } from './api/middleware/auth.js';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    metrics: MetricsCollector;
+  }
+}
 
 export interface AppDeps {
   config: AppConfig;
   db: Database.Database;
   engine: EngineManager;
-  /** Defaults to a fresh, unobserved bus - pass one in to attach a MetricsCollector to it (see AppState). */
-  eventBus?: EventBus<AppEventMap>;
+}
+
+function selectRawEngineClient(deps: AppDeps): RawEngineClient {
+  if (deps.config.ENGINE_MODE === 'llama-cpp') {
+    return createLlamaCppRawClient(deps.engine, {
+      model: deps.config.ENGINE_MODEL_NAME,
+      requestTimeoutMs: deps.config.ENGINE_REQUEST_TIMEOUT_MS
+    });
+  }
+  return createMockRawEngineClient(deps.engine);
 }
 
 /**
@@ -34,6 +53,7 @@ export interface AppDeps {
  */
 export function buildApp(deps: AppDeps): FastifyInstance {
   const app = Fastify({
+    trustProxy: deps.config.TRUST_PROXY,
     logger: {
       level: deps.config.LOG_LEVEL,
       redact: {
@@ -51,9 +71,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     }
   });
 
-  const eventBus = deps.eventBus ?? new EventBus<AppEventMap>();
+  const eventBus = new EventBus<AppEventMap>();
+  const metrics = new MetricsCollector(eventBus);
+  app.decorate('metrics', metrics);
+
   const runsRepository = new RunsRepository(deps.db);
-  const engineClient = new ResilientEngineClient(deps.engine, eventBus, app.log);
+  const rawEngineClient = selectRawEngineClient(deps);
+  const engineClient = new ResilientEngineClient(deps.engine, rawEngineClient, eventBus, app.log);
   const generationService = new GenerationService(runsRepository, engineClient, eventBus, app.log);
 
   app.setErrorHandler((err, request, reply) => {
@@ -82,7 +106,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     reply.status(404).send({ error: 'ROUTE_NOT_FOUND', message: 'The requested route does not exist' });
   });
 
+  registerAuthMiddleware(app, deps.config);
+
   registerHealthRoutes(app, deps.db, deps.engine);
+  registerInternalHealthRoute(app, deps.db, deps.config, deps.engine, engineClient, metrics);
   registerGenerateRoute(app, deps.config, runsRepository, generationService);
   registerRunsRoutes(app, runsRepository, generationService);
 
@@ -114,14 +141,10 @@ export interface AppStateSnapshot {
  */
 export class AppState {
   private readonly fastify: FastifyInstance;
-  private readonly eventBus: EventBus<AppEventMap>;
-  private readonly metrics: MetricsCollector;
   private lifecycle: AppLifecycle = 'created';
 
   constructor(private readonly deps: AppDeps) {
-    this.eventBus = deps.eventBus ?? new EventBus<AppEventMap>();
-    this.fastify = buildApp({ ...deps, eventBus: this.eventBus });
-    this.metrics = new MetricsCollector(this.eventBus);
+    this.fastify = buildApp(deps);
   }
 
   async start(): Promise<void> {
@@ -145,7 +168,7 @@ export class AppState {
       lifecycle: this.lifecycle,
       dbOpen: this.deps.db.open,
       engineReady: this.deps.engine.isReady(),
-      metrics: this.metrics.getSnapshot()
+      metrics: this.fastify.metrics.getSnapshot()
     };
   }
 

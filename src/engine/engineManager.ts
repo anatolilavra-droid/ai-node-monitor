@@ -26,18 +26,39 @@ async function pollUntilOk(url: string, deadline: number): Promise<boolean> {
   return false;
 }
 
+async function checkOnce(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Owns the lifecycle of the local inference engine child process: spawns
- * it bound to 127.0.0.1, tracks readiness, and restarts it with a bounded
- * retry count inside a rolling window if it crashes. The engine and the
- * Fastify process are independent - a crash here must not crash the API,
- * it must only be reflected in /ready.
+ * Owns readiness tracking for the local inference engine, in one of two
+ * modes (ENGINE_MODE):
+ *
+ * - 'mock': spawns and owns a child process (mockEngineServer.ts), bound
+ *   to 127.0.0.1, and restarts it with a bounded retry count inside a
+ *   rolling window if it crashes. Dev/test only.
+ * - 'llama-cpp': the engine is a real llama.cpp server, started and
+ *   supervised independently (its own systemd unit - see
+ *   docs/DEPLOYMENT.md). This class never spawns or kills it, only polls
+ *   its GET /health on an interval, since a crash/restart there produces
+ *   no OS-level signal this process can otherwise observe.
+ *
+ * Either way, the engine and the Fastify process are independent - a
+ * problem here must not crash the API, it must only be reflected in
+ * `isReady()` (and therefore `/ready`).
  */
 export class EngineManager {
   private child: ChildProcess | undefined;
   private ready = false;
   private stopped = false;
   private restartTimestamps: number[] = [];
+  private healthPollTimer: NodeJS.Timeout | undefined;
+  private polling = false;
   private readonly baseUrl: string;
 
   constructor(
@@ -56,19 +77,61 @@ export class EngineManager {
   }
 
   async start(): Promise<void> {
-    this.spawnChild();
+    if (this.config.ENGINE_MODE === 'mock') {
+      this.spawnChild();
+    } else {
+      this.logger.info(
+        { baseUrl: this.baseUrl },
+        'ENGINE_MODE=llama-cpp: connecting to an externally-managed engine, not spawning one'
+      );
+    }
+
     const deadline = Date.now() + this.config.ENGINE_STARTUP_TIMEOUT_MS;
-
-    const healthy = await pollUntilOk(`${this.baseUrl}/health`, deadline);
-    if (!healthy) {
-      this.logger.error({ baseUrl: this.baseUrl }, 'engine did not become healthy within startup timeout');
-      return;
-    }
-
-    this.ready = await pollUntilOk(`${this.baseUrl}/ready`, deadline);
+    this.ready = await this.waitUntilReady(deadline);
     if (!this.ready) {
-      this.logger.error({ baseUrl: this.baseUrl }, 'engine did not become ready within startup timeout');
+      this.logger.error(
+        { baseUrl: this.baseUrl },
+        'engine did not become ready within startup timeout; will keep retrying in the background'
+      );
     }
+
+    if (this.config.ENGINE_MODE === 'llama-cpp') {
+      this.startHealthPolling();
+    }
+  }
+
+  /**
+   * The mock engine implements a distinct GET /ready that lags GET
+   * /health by design (see mockEngineServer.ts's STARTUP_DELAY_MS), so
+   * startup checks both. A real llama.cpp server has only GET /health,
+   * which itself only returns 200 once the model is loaded - that single
+   * check is both liveness and readiness for 'llama-cpp' mode.
+   */
+  private async waitUntilReady(deadline: number): Promise<boolean> {
+    const healthy = await pollUntilOk(`${this.baseUrl}/health`, deadline);
+    if (!healthy) return false;
+    if (this.config.ENGINE_MODE === 'mock') {
+      return pollUntilOk(`${this.baseUrl}/ready`, deadline);
+    }
+    return true;
+  }
+
+  private startHealthPolling(): void {
+    this.healthPollTimer = setInterval(() => {
+      if (this.polling || this.stopped) return;
+      this.polling = true;
+      void checkOnce(`${this.baseUrl}/health`)
+        .then((ok) => {
+          if (ok !== this.ready) {
+            this.logger.warn({ ready: ok }, 'external engine readiness changed');
+          }
+          this.ready = ok;
+        })
+        .finally(() => {
+          this.polling = false;
+        });
+    }, this.config.ENGINE_HEALTH_POLL_INTERVAL_MS);
+    this.healthPollTimer.unref();
   }
 
   private spawnChild(): void {
@@ -108,6 +171,10 @@ export class EngineManager {
   async stop(): Promise<void> {
     this.stopped = true;
     this.ready = false;
+    if (this.healthPollTimer) {
+      clearInterval(this.healthPollTimer);
+      this.healthPollTimer = undefined;
+    }
     if (!this.child) return;
     const child = this.child;
     await new Promise<void>((resolve) => {

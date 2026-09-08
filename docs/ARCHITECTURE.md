@@ -25,10 +25,15 @@ src/db/         SQLite. RunsRepository is the only place that writes SQL,
                 connection.ts and migrate.ts own the schema lifecycle.
 
 src/engine/     Everything about talking to the local inference engine:
-                process lifecycle (EngineManager), the raw HTTP/NDJSON
-                client (engineClient.ts), and the resilience layer
-                (CircuitBreaker, RetryPolicy, ResilientEngineClient) that
-                implements EnginePort for the domain layer.
+                process lifecycle (EngineManager, mode-aware - spawns a
+                child process in dev/test, only health-polls a real
+                llama.cpp server in production), two protocol-specific
+                RawEngineClient implementations (engineClient.ts's mock
+                NDJSON, llamaCppEngineClient.ts's OpenAI-compatible SSE),
+                and the resilience layer (CircuitBreaker, RetryPolicy,
+                ResilientEngineClient) that implements EnginePort for the
+                domain layer on top of whichever RawEngineClient is
+                configured.
 
 src/telemetry/  A small typed event bus and a MetricsCollector that
                 subscribes to it. Nothing above this layer needs to know
@@ -137,39 +142,64 @@ resource-specific subclass.
 
 ## Engine resilience
 
+`ResilientEngineClient` (the `EnginePort` implementation `GenerationService`
+actually uses) does not know how to speak to any specific engine - it
+takes a `RawEngineClient` (`engine/rawEngineClient.ts`) as a constructor
+dependency and wraps whichever one is configured with identical
+circuit-breaker/retry/cancellation logic:
+
+```mermaid
+flowchart LR
+    GS["GenerationService"] --> EP["EnginePort"]
+    EP -.implemented by.-> RES["ResilientEngineClient"]
+    RES --> CB["CircuitBreaker"]
+    RES --> RT["RetryPolicy"]
+    RES --> RAW["RawEngineClient"]
+    RAW -.implemented by.-> MOCK["mock protocol (engineClient.ts)<br/>NDJSON - dev/test only"]
+    RAW -.implemented by.-> LLAMA["llama.cpp protocol (llamaCppEngineClient.ts)<br/>OpenAI-compatible SSE - production"]
+```
+
+`ENGINE_MODE` (config) selects which `RawEngineClient` `buildApp` wires
+into `ResilientEngineClient` (`selectRawEngineClient` in `app.ts`); no
+other code changes between modes.
+
 ```mermaid
 sequenceDiagram
     participant G as GenerationService
     participant R as ResilientEngineClient
     participant CB as CircuitBreaker
     participant RT as RetryPolicy
+    participant RAW as RawEngineClient
     participant E as Engine (127.0.0.1)
 
     G->>R: isReady()?
     R->>CB: canProceed()?
     CB-->>R: yes (closed or half-open)
     G->>R: streamCompletion(input, signal)
-    R->>RT: execute(connect)
+    R->>RT: execute(rawClient.connect)
     loop until connected or attempts exhausted
-        RT->>E: POST /completion (connect only)
+        RT->>RAW: connect(input, signal)
+        RAW->>E: open completion request (protocol-specific)
         alt connects
-            E-->>RT: reader
+            E-->>RAW: reader
         else fails, not aborted
             RT->>RT: backoff, retry
         end
     end
     RT-->>R: reader
     R->>CB: recordSuccess()
-    R-->>G: yield tokens (consumeCompletion, not retried)
+    R-->>G: yield tokens (rawClient.consume, not retried)
 ```
 
-Two rules keep this safe:
+Two rules keep this safe, enforced in `ResilientEngineClient` regardless
+of which `RawEngineClient` is behind it:
 
-1. **Only the connection attempt is retried.** Once `consumeCompletion`
-   has started yielding tokens from a reader, a failure is never retried
-   - retrying after partial output would duplicate tokens the caller has
-   already seen. `engineClient.ts` splits `connectCompletion` (retryable)
-   from `consumeCompletion` (not) for exactly this reason.
+1. **Only the connection attempt is retried.** Once a raw client's
+   `consume()` has started yielding tokens from a reader, a failure is
+   never retried - retrying after partial output would duplicate tokens
+   the caller has already seen. Both `engineClient.ts` (mock) and
+   `llamaCppEngineClient.ts` (production) split their own `connect`
+   (retryable) from `consume` (not) for exactly this reason.
 2. **A cancellation is never a circuit-breaker failure.** `isAbortError`
    checks `err.name === 'AbortError'` and short-circuits both the retry
    policy's `isRetryable` and `ResilientEngineClient.recordOutcome` -
@@ -178,11 +208,24 @@ Two rules keep this safe:
    would trip the breaker for everyone.
 
 `GET /ready` intentionally still reports `EngineManager.isReady()` (raw
-process liveness), not the circuit breaker's state: a liveness/readiness
-probe answering "is the process itself up" is a different question from
-"should we currently attempt a generation," and conflating them would
-make an operator's health check flap on transient generation failures
-that the circuit breaker is specifically designed to absorb quietly.
+process/health liveness), not the circuit breaker's state: a
+liveness/readiness probe answering "is the engine process itself up" is a
+different question from "should we currently attempt a generation," and
+conflating them would make an operator's health check flap on transient
+generation failures that the circuit breaker is specifically designed to
+absorb quietly. `GET /internal/health` (an operational endpoint, not part
+of the stable contract in `CONTRACT.md` - see `docs/MONITORING.md`) does
+expose the circuit breaker's state (`ResilientEngineClient.getCircuitState()`)
+for diagnostics.
+
+`EngineManager` itself has two modes selected by the same `ENGINE_MODE`:
+in `'mock'` it spawns and restarts a child process (dev/test, unchanged
+from before); in `'llama-cpp'` it never spawns or kills anything - the
+engine is a real llama.cpp server supervised by its own systemd unit
+(`deploy/systemd/llama-cpp.service.example`) - and instead polls
+`GET /health` on an interval (`ENGINE_HEALTH_POLL_INTERVAL_MS`) to notice
+if it becomes unhealthy or recovers, since an externally-managed
+process's crash/restart produces no signal this one would otherwise see.
 
 ## Telemetry
 
@@ -194,11 +237,14 @@ publishes `engine.circuit` on every state change. Payloads carry only
 `runId`, `status`, `tokenCount`, and (for failures) `errorMessage` - never
 `prompt` or `output`, per non-negotiable #7.
 
-`MetricsCollector` is the one subscriber today: it aggregates these into
-plain counters, readable via `AppState.getState().metrics`. It is not
-exposed over HTTP (the contract in `CONTRACT.md` is stable and this
-refactor does not touch it), but it is the natural place to hang a future
-`/metrics` route without touching `GenerationService` again.
+`MetricsCollector` is the one subscriber today: `buildApp` constructs
+exactly one per process and decorates the Fastify instance with it
+(`app.metrics`, typed via Fastify module augmentation in `app.ts`) so
+both `AppState.getState()` and the `GET /internal/health` route
+(`api/internalHealth.ts`, `telemetry/healthCheck.ts`) can read the same
+snapshot. This is deliberately not the stable `CONTRACT.md` surface -
+`/internal/health`'s shape can grow without a contract version bump (see
+`docs/MONITORING.md`).
 
 ## Process lifecycle (`AppState`)
 
@@ -217,11 +263,19 @@ shutdown was triggered. `getState()` returns a snapshot (`lifecycle`,
 `dbOpen` via better-sqlite3's own `.open` flag, `engineReady`, and the
 metrics snapshot) for structured shutdown logging.
 
-## What did not change
+## What the CONTRACT.md contract guarantees stays stable
 
-- The HTTP/SSE contract (`CONTRACT.md`) - every route, status code, and
-  event name is byte-for-byte the same.
-- The `public/` monitoring console.
+- Every route, status code, and SSE event name documented in
+  `CONTRACT.md` is unchanged by production-readiness work (real engine
+  support, the optional auth gate, `/internal/health`) - additive only.
+- The `public/` monitoring console (unauthenticated by design - see
+  `docs/SECURITY.md` on why enabling `API_AUTH_ENABLED` doesn't change
+  that without a reverse-proxy workaround).
 - The `runs` and `idempotency_keys` schema and `db/migrations/`.
-- `EngineManager` (process spawn/health/restart) and the mock engine's own
-  HTTP contract.
+- The mock engine's own dev/test HTTP contract
+  (`GET /health`, `GET /ready`, `POST /completion`).
+
+`GET /internal/health` and the optional `Authorization: Bearer` gate on
+`/generate`/`/runs*` (`API_AUTH_ENABLED`) are both new, additive surface
+introduced for production deployments - see `docs/MONITORING.md` and
+`docs/SECURITY.md` respectively. Neither is part of `CONTRACT.md`.

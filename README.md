@@ -12,6 +12,13 @@ See [`CLAUDE.md`](CLAUDE.md) for the project's non-negotiables and
 conventions, and [`docs/CONTRACT.md`](docs/CONTRACT.md) for the HTTP/SSE
 contract.
 
+**Deploying to production?** See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
+(systemd, a real llama.cpp engine, backups, reverse proxy),
+[`docs/SECURITY.md`](docs/SECURITY.md) (checklist and threat model),
+[`docs/MONITORING.md`](docs/MONITORING.md), and the
+[`docs/RUNBOOKS/`](docs/RUNBOOKS/) for backup/restore, engine restarts,
+and model updates.
+
 ## Screenshots
 
 The monitoring console is plain, browser-native JS — no framework, no
@@ -128,16 +135,30 @@ process bound to `127.0.0.1` (see "Engine" below).
 
 ## Engine
 
-`src/engine/mockEngineServer.ts` is a deterministic, dependency-free mock
-model used for local development: it produces real generated tokens with
-real measured timing over a small HTTP contract (`GET /health`,
-`GET /ready`, `POST /completion`), but does no actual deep-learning
-inference. `src/engine/engineManager.ts` spawns it as an independent OS
-process, restarts it with a bounded retry count if it crashes, and exposes
-its readiness through `GET /ready`. Swapping in a real engine (e.g.
-llama.cpp's server) means implementing the same three-endpoint contract
-and pointing `EngineManager` at it — the rest of the system does not need
-to change.
+`ENGINE_MODE` selects which engine `power-node` talks to:
+
+- **`mock`** (default) — `src/engine/mockEngineServer.ts`, a
+  deterministic, dependency-free dev/test engine: it produces real
+  generated tokens with real measured timing over a small NDJSON HTTP
+  contract, but does no actual deep-learning inference.
+  `src/engine/engineManager.ts` spawns it as an independent OS process
+  and restarts it with a bounded retry count if it crashes.
+  **Deprecated for anything but local development/CI** — see the
+  `@deprecated` notes in `src/engine/engineClient.ts`.
+- **`llama-cpp`** (production) — connects to an already-running
+  [llama.cpp](https://github.com/ggml-org/llama.cpp) server over its
+  OpenAI-compatible `POST /v1/chat/completions` (SSE, `stream: true`).
+  `power-node` never spawns or kills this process — it's supervised
+  independently (its own systemd unit,
+  `deploy/systemd/llama-cpp.service.example`) and `EngineManager`
+  health-polls `GET /health` on an interval instead. See
+  [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+Both modes implement the same internal `EnginePort`/`RawEngineClient`
+abstractions (`src/domain/ports.ts`, `src/engine/rawEngineClient.ts`), so
+`GenerationService`'s circuit-breaker/retry/cancellation logic
+(`src/engine/resilientEngineClient.ts`) is identical either way — see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## API
 
@@ -153,6 +174,13 @@ to change.
   in-flight generation.
 
 Full request/response and SSE event shapes: [`docs/CONTRACT.md`](docs/CONTRACT.md).
+
+Additionally, `GET /internal/health` returns deeper operational
+diagnostics (DB latency, engine circuit-breaker state, disk space,
+metrics) — this is *not* part of the stable contract above (its shape may
+grow), see [`docs/MONITORING.md`](docs/MONITORING.md). If
+`API_AUTH_ENABLED=true`, it stays open (like `/health`/`/ready`) for
+infra health checks.
 
 ## Testing
 
@@ -178,16 +206,23 @@ migrations as a build artifact. There is no live deploy target yet
 artifact is what you'd copy onto a host and run with `node dist/server.js`
 behind a process supervisor (systemd, pm2, etc.).
 
-## Known limitations (v0.1 scaffold)
+## Known limitations
 
-- The inference engine is a deterministic mock, not a real model runtime.
+- `ENGINE_MODE=mock` is a deterministic dev/test stand-in, not a real
+  model runtime — production deployments must use `ENGINE_MODE=llama-cpp`
+  (see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)).
 - Idempotent replay of `POST /generate` returns the run's current stored
   state as a single snapshot; it does not re-attach a second connection to
   a still-streaming generation.
-- No authentication/authorization — single-tenant appliance.
-- No model manifest loading/validation yet (non-negotiable #12 covers this
-  once real model loading exists).
+- Authentication is optional and off by default (`API_AUTH_ENABLED`), and
+  is a single shared bearer token with no per-user isolation — this
+  remains a single-tenant appliance. See [`docs/SECURITY.md`](docs/SECURITY.md)
+  for exactly what it does and does not cover.
+- No model manifest/signature validation — operators verify a model's
+  checksum manually per [`docs/RUNBOOKS/model-update.md`](docs/RUNBOOKS/model-update.md)
+  (non-negotiable #12 covers this once built-in validation exists).
 - Engine port is fixed (`ENGINE_START_PORT`), not scanned for availability.
+- Backups (`deploy/scripts/backup.sh`) are not encrypted at rest.
 
 ## Project structure
 
@@ -197,15 +232,18 @@ for how the two test suites differ.
 
 ```
 .github/workflows/   CI pipeline (typecheck, lint, test, build)
+deploy/              systemd units, backup script, logrotate config
 db/migrations/       immutable SQL schema migrations
-docs/                API/SSE contract, architecture, testing guide, screenshots
+docs/                contract, architecture, testing, deployment, security,
+                     monitoring, runbooks, screenshots
 src/config/          env loading and validation (Zod)
 src/domain/          business logic: GenerationService, run state machine
                      (status.ts), structured errors, port interfaces
 src/db/              SQLite: RunsRepository (implements RunsRepositoryPort),
                      connection + migration runner
 src/engine/          engine process manager, resilient client
-                     (circuit breaker + retry, implements EnginePort)
+                     (circuit breaker + retry, implements EnginePort),
+                     mock (dev/test) and llama.cpp (production) raw clients
 src/telemetry/       event bus + metrics collector
 src/schemas/         Zod request schemas
 src/api/             Fastify route handlers (HTTP/SSE only, no business logic)
