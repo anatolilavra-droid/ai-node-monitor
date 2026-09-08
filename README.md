@@ -207,7 +207,7 @@ tests/unit/          fast, no I/O
 tests/integration/   real SQLite + real engine process
 ```
 
-## Contributions
+## Contributors
 
 - Idea & project owner: [@anatolilavra-droid](https://github.com/anatolilavra-droid)
 - Implementation: [Claude Code](https://claude.ai/code)
